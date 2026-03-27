@@ -64,6 +64,27 @@ async def test_get_wrong_type_raises():
         await store.get("leaders")
 
 
+@pytest.mark.asyncio
+async def test_dbsize_and_exists_track_expired_records():
+    store = DataStore(max_keys=5)
+    await store.set("alive", "1")
+    await store.set("soon-gone", "2", ex=1)
+    assert await store.dbsize() == 2
+    assert await store.exists("alive", "soon-gone", "missing") == 2
+    await asyncio.sleep(1.1)
+    await store.purge_expired()
+    assert await store.dbsize() == 1
+    assert await store.exists("alive", "soon-gone") == 1
+
+
+@pytest.mark.asyncio
+async def test_persist_returns_false_for_missing_or_non_expiring_key():
+    store = DataStore(max_keys=5)
+    await store.set("plain", "1")
+    assert await store.persist("plain") is False
+    assert await store.persist("missing") is False
+
+
 def test_skiplist_range_ordering():
     skiplist = SkipList()
     skiplist.insert(2.0, "beta")

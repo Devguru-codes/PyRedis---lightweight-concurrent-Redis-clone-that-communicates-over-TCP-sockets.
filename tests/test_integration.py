@@ -81,11 +81,13 @@ async def test_wrong_type_and_invalid_argument_errors(redis_client):
 async def test_info_reports_metrics(redis_client):
     reader, writer = redis_client
     await send_command(writer, reader, "PING")
+    await send_command(writer, reader, "BOGUS")
     payload = await send_command(writer, reader, "INFO")
     assert b"commands_processed:" in payload
     assert b"command_errors:" in payload
     assert b"active_connections:" in payload
     assert b"total_connections:" in payload
+    assert b"command_errors:1" in payload
 
 
 @pytest.mark.asyncio
@@ -100,6 +102,33 @@ async def test_protocol_error_closes_connection(redis_server):
     finally:
         writer.close()
         await writer.wait_closed()
+
+
+@pytest.mark.asyncio
+async def test_inline_command_support(redis_server):
+    host, port, _server = redis_server
+    reader, writer = await asyncio.open_connection(host, port)
+    try:
+        writer.write(b"PING inline\r\n")
+        await writer.drain()
+        assert await reader.readuntil(b"\r\n") == b"$6\r\n"
+        assert await reader.readexactly(8) == b"inline\r\n"
+    finally:
+        writer.close()
+        await writer.wait_closed()
+
+
+@pytest.mark.asyncio
+async def test_unknown_command_returns_error(redis_client):
+    reader, writer = redis_client
+    assert await send_command(writer, reader, "DOESNOTEXIST") == b"-ERR unknown command 'DOESNOTEXIST'\r\n"
+
+
+@pytest.mark.asyncio
+async def test_persist_missing_and_type_none(redis_client):
+    reader, writer = redis_client
+    assert await send_command(writer, reader, "PERSIST", "missing") == b":0\r\n"
+    assert await send_command(writer, reader, "TYPE", "missing") == b"+NONE\r\n"
 
 
 @pytest.mark.asyncio
