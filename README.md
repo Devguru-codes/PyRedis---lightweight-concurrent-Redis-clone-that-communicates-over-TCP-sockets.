@@ -143,7 +143,7 @@ powershell -ExecutionPolicy Bypass -File .\scripts\build_image.ps1
 Run the server container directly:
 
 ```powershell
-docker run --rm -p 6380:6380 pyredis:latest
+docker run --rm -p 6380:6380 -v ${PWD}\data:/app/data pyredis:latest
 ```
 
 Run the full compose stack:
@@ -155,12 +155,19 @@ docker compose up --build
 This starts:
 - `pyredis` server container
 - two load-test client containers that send concurrent requests
+- a bind-mounted `data/` directory for snapshots
+- a bind-mounted `benchmarks/` directory for load-test JSON reports
 
 ## Docker Files
 The project includes:
 - [Dockerfile](C:\Users\devgu\Downloads\PyRedis\Dockerfile) for building the PyRedis image
 - [docker-compose.yml](C:\Users\devgu\Downloads\PyRedis\docker-compose.yml) for starting the server and load-test clients together
 - [scripts/build_image.ps1](C:\Users\devgu\Downloads\PyRedis\scripts\build_image.ps1) for a one-command image build on Windows PowerShell
+
+## Docker Notes
+- the container starts with `pyredis.toml` by default via `PYREDIS_CONFIG`
+- snapshots are written under `/app/data`
+- compose load tests write benchmark artifacts under `/app/benchmarks`
 
 ## Design Notes
 - `lru.py`: tracks most/least recently used keys using a doubly linked list and hash map

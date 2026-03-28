@@ -2,8 +2,13 @@ services:
   pyredis:
     build: .
     container_name: pyredis-server
+    environment:
+      PYREDIS_CONFIG: /app/pyredis.toml
     ports:
       - "6380:6380"
+    volumes:
+      - ./data:/app/data
+      - ./benchmarks:/app/benchmarks
     healthcheck:
       test: ["CMD", "python", "-c", "import socket; s=socket.create_connection(('127.0.0.1', 6380), timeout=2); s.close()"]
       interval: 5s
@@ -15,11 +20,15 @@ services:
     depends_on:
       pyredis:
         condition: service_healthy
-    command: ["python", "scripts/stress_client.py", "--host", "pyredis", "--port", "6380", "--requests", "200", "--concurrency", "40"]
+    volumes:
+      - ./benchmarks:/app/benchmarks
+    command: ["python", "scripts/stress_client.py", "--host", "pyredis", "--port", "6380", "--requests", "200", "--concurrency", "40", "--json-out", "/app/benchmarks/loadtest-a.json"]
 
   loadtest-b:
     build: .
     depends_on:
       pyredis:
         condition: service_healthy
-    command: ["python", "scripts/stress_client.py", "--host", "pyredis", "--port", "6380", "--requests", "200", "--concurrency", "40"]
+    volumes:
+      - ./benchmarks:/app/benchmarks
+    command: ["python", "scripts/stress_client.py", "--host", "pyredis", "--port", "6380", "--requests", "200", "--concurrency", "40", "--json-out", "/app/benchmarks/loadtest-b.json"]
