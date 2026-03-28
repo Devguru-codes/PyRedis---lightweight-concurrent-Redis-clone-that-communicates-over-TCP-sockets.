@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import json
+from pathlib import Path
 
 import pytest
 
@@ -21,7 +23,8 @@ async def test_expire_and_ttl(redis_client):
     await send_command(writer, reader, "SET", "temp", "42")
     assert await send_command(writer, reader, "EXPIRE", "temp", "1") == b":1\r\n"
     ttl_response = await send_command(writer, reader, "TTL", "temp")
-    assert ttl_response.startswith(b":")
+    ttl_value = int(ttl_response[1:-2])
+    assert ttl_value in {0, 1}
     await asyncio.sleep(1.2)
     assert await send_command(writer, reader, "GET", "temp") == b"$-1\r\n"
 
@@ -62,6 +65,23 @@ async def test_mset_mget_dbsize_type_and_persist(redis_client):
 
 
 @pytest.mark.asyncio
+async def test_extended_string_and_zset_commands(redis_client):
+    reader, writer = redis_client
+    assert await send_command(writer, reader, "SETNX", "name", "py") == b":1\r\n"
+    assert await send_command(writer, reader, "SETNX", "name", "ignored") == b":0\r\n"
+    assert await send_command(writer, reader, "APPEND", "name", "redis") == b":7\r\n"
+    assert await send_command(writer, reader, "STRLEN", "name") == b":7\r\n"
+    assert await send_command(writer, reader, "INCRBY", "counter", "5") == b":5\r\n"
+    assert await send_command(writer, reader, "DECR", "counter") == b":4\r\n"
+    assert await send_command(writer, reader, "DECRBY", "counter", "3") == b":1\r\n"
+    assert await send_command(writer, reader, "ZADD", "leaders", "1", "alice", "2", "bob") == b":2\r\n"
+    assert await send_command(writer, reader, "ZCARD", "leaders") == b":2\r\n"
+    assert await send_command(writer, reader, "ZSCORE", "leaders", "alice") == b"$1\r\n1\r\n"
+    assert await send_command(writer, reader, "ZREM", "leaders", "alice", "missing") == b":1\r\n"
+    assert await send_command(writer, reader, "ZCARD", "leaders") == b":1\r\n"
+
+
+@pytest.mark.asyncio
 async def test_wrong_type_and_invalid_argument_errors(redis_client):
     reader, writer = redis_client
     await send_command(writer, reader, "ZADD", "leaders", "1", "alice")
@@ -88,6 +108,10 @@ async def test_info_reports_metrics(redis_client):
     assert b"active_connections:" in payload
     assert b"total_connections:" in payload
     assert b"command_errors:1" in payload
+    assert b"total_reads:" in payload
+    assert b"total_writes:" in payload
+    assert b"read_hits:" in payload
+    assert b"read_misses:" in payload
 
 
 @pytest.mark.asyncio
@@ -129,6 +153,69 @@ async def test_persist_missing_and_type_none(redis_client):
     reader, writer = redis_client
     assert await send_command(writer, reader, "PERSIST", "missing") == b":0\r\n"
     assert await send_command(writer, reader, "TYPE", "missing") == b"+NONE\r\n"
+
+
+@pytest.mark.asyncio
+async def test_auth_required(auth_server):
+    host, port, _server = auth_server
+    reader, writer = await asyncio.open_connection(host, port)
+    try:
+        assert await send_command(writer, reader, "GET", "name") == b"-NOAUTH Authentication required\r\n"
+        assert await send_command(writer, reader, "PING", "hello") == b"$5\r\nhello\r\n"
+        assert await send_command(writer, reader, "AUTH", "wrong") == b"-ERR invalid password\r\n"
+        assert await send_command(writer, reader, "AUTH", "secret") == b"+OK\r\n"
+        assert await send_command(writer, reader, "SET", "name", "secure") == b"+OK\r\n"
+        assert await send_command(writer, reader, "GET", "name") == b"$6\r\nsecure\r\n"
+    finally:
+        writer.close()
+        await writer.wait_closed()
+
+
+@pytest.mark.asyncio
+async def test_save_and_reload_snapshot(redis_server, tmp_path: Path):
+    host, port, server = redis_server
+    reader, writer = await asyncio.open_connection(host, port)
+    try:
+        await send_command(writer, reader, "SET", "persisted", "value")
+        await send_command(writer, reader, "SET", "ttl-key", "temp", "EX", "60")
+        await send_command(writer, reader, "ZADD", "leaders", "1", "alice")
+        assert await send_command(writer, reader, "SAVE") == b"+OK\r\n"
+    finally:
+        writer.close()
+        await writer.wait_closed()
+        await server.close()
+
+    snapshot_path = tmp_path / "dump.json"
+    snapshot_data = json.loads(snapshot_path.read_text(encoding="utf-8"))
+    assert snapshot_data["records"]["persisted"]["value"] == "value"
+    assert snapshot_data["records"]["leaders"]["kind"] == "zset"
+    assert snapshot_data["records"]["ttl-key"]["expires_at"] is not None
+
+    from pyredis.config import ServerConfig
+    from pyredis.server import PyRedisServer
+
+    reloaded = PyRedisServer(
+        ServerConfig(
+            host="127.0.0.1",
+            port=0,
+            max_keys=10,
+            ttl_check_interval=0.05,
+            snapshot_path=str(tmp_path / "dump.json"),
+            load_snapshot_on_startup=True,
+        )
+    )
+    await reloaded.start()
+    host2, port2 = reloaded.address
+    reader2, writer2 = await asyncio.open_connection(host2, port2)
+    try:
+        assert await send_command(writer2, reader2, "GET", "persisted") == b"$5\r\nvalue\r\n"
+        ttl_response = await send_command(writer2, reader2, "TTL", "ttl-key")
+        assert int(ttl_response[1:-2]) >= 0
+        assert await send_command(writer2, reader2, "ZRANGE", "leaders", "0", "-1") == b"*1\r\n$5\r\nalice\r\n"
+    finally:
+        writer2.close()
+        await writer2.wait_closed()
+        await reloaded.close()
 
 
 @pytest.mark.asyncio

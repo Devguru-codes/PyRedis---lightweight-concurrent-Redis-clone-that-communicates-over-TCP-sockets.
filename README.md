@@ -10,7 +10,9 @@ PyRedis is a lightweight Redis-inspired in-memory key-value datastore built from
 - TTL expiration using a min-heap
 - Sorted sets implemented with a skip list
 - Stronger protocol and command error handling
-- Basic server metrics in `INFO`
+- Snapshot persistence support
+- Authentication and TOML config support
+- Richer server metrics in `INFO`
 - Socket-level integration tests using `pytest-asyncio`
 - Docker, `docker-compose`, and GitHub Actions CI support
 
@@ -19,6 +21,7 @@ PyRedis is a lightweight Redis-inspired in-memory key-value datastore built from
 PyRedis/
 |-- implementation_plan.md
 |-- requirements.txt
+|-- pyredis.toml
 |-- pyproject.toml
 |-- Dockerfile
 |-- docker-compose.yml
@@ -31,15 +34,20 @@ PyRedis/
 |   |-- commands.py
 |   |-- config.py
 |   |-- datastore.py
+|   |-- errors.py
 |   |-- lru.py
+|   |-- persistence.py
 |   |-- protocol.py
 |   |-- server.py
 |   |-- skiplist.py
 |   |-- ttl.py
 |   `-- zset.py
 `-- tests/
+    |-- test_benchmark.py
+    |-- test_config.py
     |-- test_datastore.py
-    `-- test_integration.py
+    |-- test_integration.py
+    `-- test_protocol.py
 ```
 
 ## Implemented Commands
@@ -52,15 +60,26 @@ PyRedis/
 - `EXPIRE key seconds`
 - `TTL key`
 - `INCR key`
+- `INCRBY key amount`
+- `DECR key`
+- `DECRBY key amount`
 - `MSET key value [key value ...]`
 - `MGET key [key ...]`
+- `SETNX key value`
+- `APPEND key value`
+- `STRLEN key`
 - `FLUSHALL`
 - `INFO`
 - `TYPE key`
 - `DBSIZE`
 - `PERSIST key`
+- `AUTH password`
+- `SAVE`
 - `ZADD key score member [score member ...]`
 - `ZRANGE key start stop`
+- `ZCARD key`
+- `ZSCORE key member`
+- `ZREM key member [member ...]`
 
 ## Local Setup
 ```powershell
@@ -73,7 +92,13 @@ python -m pip install -e .
 
 ## Run The Server
 ```powershell
-python -m pyredis --host 127.0.0.1 --port 6380
+python -m pyredis --config pyredis.toml
+```
+
+Or override values directly:
+
+```powershell
+python -m pyredis --host 127.0.0.1 --port 6380 --snapshot-path data\dump.json
 ```
 
 ## Run A Demo Client
@@ -87,8 +112,19 @@ python scripts\async_client_demo.py --host 127.0.0.1 --port 6380
 ```powershell
 ruff check .
 pytest
+pytest tests\test_protocol.py
+pytest tests\test_integration.py -k snapshot
 python scripts\stress_client.py --host 127.0.0.1 --port 6380 --requests 400 --concurrency 50
+python scripts\stress_client.py --host 127.0.0.1 --port 6380 --requests 400 --concurrency 50 --json-out benchmark.json
 ```
+
+## Test Coverage Highlights
+- config loading and missing-file handling
+- snapshot export/import and on-disk snapshot validation
+- auth enforcement and post-auth command flow
+- protocol parsing edge cases and malformed RESP payloads
+- benchmark report generation
+- key metrics such as hit/miss, eviction, and expiration counters
 
 ## Docker Image Build
 Build the Docker image manually:
@@ -132,10 +168,15 @@ The project includes:
 - `commands.py`: registers commands with decorators and dispatches them using a command pattern
 - `server.py`: handles concurrent socket clients with `asyncio.start_server`
 - `errors.py`: centralizes protocol and command exceptions
+- `persistence.py`: saves and restores snapshots from disk
 - `skiplist.py` and `zset.py`: provide sorted set support
 
-## Next Improvements
-- Add persistence with snapshots or append-only logging
-- Add more Redis-compatible commands
-- Add authentication and configuration file support
-- Add benchmarking and observability metrics
+## Config And Auth
+- Configure the server with [pyredis.toml](C:\Users\devgu\Downloads\PyRedis\pyredis.toml)
+- Set `require_password` to a non-empty value to enable authentication
+- Clients must run `AUTH <password>` before most commands when auth is enabled
+
+## Persistence And Metrics
+- `SAVE` writes a snapshot to the configured `snapshot_path`
+- Snapshots can be auto-loaded on startup
+- `INFO` now exposes request, hit/miss, expiration, eviction, and snapshot metrics

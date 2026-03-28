@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 
 import pytest
 
@@ -83,6 +84,80 @@ async def test_persist_returns_false_for_missing_or_non_expiring_key():
     await store.set("plain", "1")
     assert await store.persist("plain") is False
     assert await store.persist("missing") is False
+
+
+@pytest.mark.asyncio
+async def test_snapshot_export_and_import_round_trip():
+    store = DataStore(max_keys=5)
+    await store.set("name", "pyredis", ex=60)
+    await store.zadd("leaders", [(1.0, "alice"), (2.0, "bob")])
+    payload = await store.export_state()
+
+    restored = DataStore(max_keys=5)
+    await restored.import_state(payload)
+
+    assert await restored.get("name") == "pyredis"
+    assert await restored.zrange("leaders", 0, -1) == ["alice", "bob"]
+    assert await restored.ttl("name") >= 0
+    info = await restored.info()
+    assert info["snapshot_loads"] == "1"
+
+
+@pytest.mark.asyncio
+async def test_import_skips_expired_records():
+    store = DataStore(max_keys=5)
+    payload = {
+        "records": {
+            "expired": {
+                "kind": "string",
+                "value": "x",
+                "expires_at": time.time() - 5,
+                "expiry_version": 1,
+            }
+        }
+    }
+    await store.import_state(payload)
+    assert await store.get("expired") is None
+
+
+@pytest.mark.asyncio
+async def test_string_commands_append_setnx_incrby_and_strlen():
+    store = DataStore(max_keys=5)
+    assert await store.setnx("key", "a") is True
+    assert await store.setnx("key", "b") is False
+    assert await store.append("key", "bc") == 3
+    assert await store.strlen("key") == 3
+    assert await store.incrby("counter", 5) == 5
+    assert await store.incrby("counter", -2) == 3
+
+
+@pytest.mark.asyncio
+async def test_zset_score_card_and_remove():
+    store = DataStore(max_keys=5)
+    await store.zadd("leaders", [(2.0, "bob"), (1.0, "alice")])
+    assert await store.zcard("leaders") == 2
+    assert await store.zscore("leaders", "alice") == 1.0
+    assert await store.zrem("leaders", "alice", "missing") == 1
+    assert await store.zcard("leaders") == 1
+
+
+@pytest.mark.asyncio
+async def test_metrics_track_hits_misses_evictions_and_expirations():
+    store = DataStore(max_keys=4)
+    await store.set("a", "1")
+    await store.set("b", "2")
+    await store.set("c", "3")
+    await store.set("expiring", "5", ex=1)
+    assert await store.get("a") == "1"
+    assert await store.get("missing") is None
+    await store.set("d", "4")
+    await asyncio.sleep(1.1)
+    await store.purge_expired()
+    info = await store.info()
+    assert info["read_hits"] == "1"
+    assert info["read_misses"] == "1"
+    assert info["evicted_keys"] == "1"
+    assert info["expired_keys"] == "1"
 
 
 def test_skiplist_range_ordering():

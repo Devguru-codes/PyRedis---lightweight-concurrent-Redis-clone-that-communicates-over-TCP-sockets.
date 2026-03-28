@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import json
 import statistics
 import time
 
@@ -40,6 +41,7 @@ async def main() -> None:
     parser.add_argument("--requests", type=int, default=200)
     parser.add_argument("--concurrency", type=int, default=50)
     parser.add_argument("--p95-threshold-ms", type=float, default=100.0)
+    parser.add_argument("--json-out", default=None)
     args = parser.parse_args()
 
     semaphore = asyncio.Semaphore(args.concurrency)
@@ -50,9 +52,26 @@ async def main() -> None:
 
     latencies = await asyncio.gather(*(runner(i) for i in range(args.requests)))
     p50 = statistics.median(latencies)
-    p95_index = max(int(len(latencies) * 0.95) - 1, 0)
-    p95 = sorted(latencies)[p95_index]
-    print(f"requests={args.requests} p50_ms={p50:.2f} p95_ms={p95:.2f}")
+    sorted_latencies = sorted(latencies)
+    p95_index = max(int(len(sorted_latencies) * 0.95) - 1, 0)
+    p99_index = max(int(len(sorted_latencies) * 0.99) - 1, 0)
+    p95 = sorted_latencies[p95_index]
+    p99 = sorted_latencies[p99_index]
+    report = {
+        "requests": args.requests,
+        "concurrency": args.concurrency,
+        "mean_ms": round(statistics.mean(latencies), 2),
+        "p50_ms": round(p50, 2),
+        "p95_ms": round(p95, 2),
+        "p99_ms": round(p99, 2),
+    }
+    print(
+        f"requests={args.requests} concurrency={args.concurrency} "
+        f"p50_ms={p50:.2f} p95_ms={p95:.2f} p99_ms={p99:.2f}"
+    )
+    if args.json_out:
+        with open(args.json_out, "w", encoding="utf-8") as handle:
+            json.dump(report, handle, indent=2, sort_keys=True)
     if p95 > args.p95_threshold_ms:
         raise SystemExit(
             f"p95 latency {p95:.2f}ms exceeded threshold {args.p95_threshold_ms:.2f}ms"

@@ -1,0 +1,10 @@
+[server]
+host = "127.0.0.1"
+port = 6380
+max_keys = 1024
+ttl_check_interval = 0.25
+require_password = ""
+snapshot_path = "data/dump.json"
+snapshot_on_shutdown = false
+load_snapshot_on_startup = true
+

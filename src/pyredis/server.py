@@ -10,6 +10,7 @@ from .commands import CommandContext, dispatch_command
 from .config import ServerConfig
 from .datastore import DataStore
 from .errors import ProtocolError
+from .persistence import SnapshotManager
 from .protocol import encode_error, read_command
 
 
@@ -17,6 +18,7 @@ class PyRedisServer:
     def __init__(self, config: ServerConfig | None = None) -> None:
         self.config = config or ServerConfig()
         self.datastore = DataStore(max_keys=self.config.max_keys)
+        self.snapshot_manager = SnapshotManager(self.config.snapshot_path)
         self.stats = {
             "commands_processed": 0,
             "command_errors": 0,
@@ -26,10 +28,13 @@ class PyRedisServer:
         }
         self._server: asyncio.AbstractServer | None = None
         self._expiry_task: asyncio.Task | None = None
+        self._connection_sequence = 0
 
     async def start(self) -> None:
         if self._server is not None:
             return
+        if self.config.load_snapshot_on_startup:
+            await self.snapshot_manager.load(self.datastore)
         self._server = await asyncio.start_server(
             self._handle_client,
             host=self.config.host,
@@ -44,6 +49,8 @@ class PyRedisServer:
             await self._server.serve_forever()
 
     async def close(self) -> None:
+        if self.config.snapshot_on_shutdown:
+            await self.snapshot_manager.save(self.datastore)
         if self._server is not None:
             self._server.close()
             await self._server.wait_closed()
@@ -64,10 +71,15 @@ class PyRedisServer:
     async def _handle_client(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         self.stats["total_connections"] += 1
         self.stats["active_connections"] += 1
+        self._connection_sequence += 1
         context = CommandContext(
             datastore=self.datastore,
             stats=self.stats,
             server_started_at=self.stats["started_at"],
+            snapshot_manager=self.snapshot_manager,
+            require_password=self.config.require_password,
+            authenticated=self.config.require_password is None,
+            connection_id=self._connection_sequence,
         )
         try:
             while True:

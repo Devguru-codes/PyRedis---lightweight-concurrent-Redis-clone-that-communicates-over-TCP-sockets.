@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from .datastore import DataStore
 from .errors import CommandError, PyRedisError
+from .persistence import SnapshotManager
 from .protocol import encode_array, encode_bulk, encode_error, encode_integer, encode_simple
 
 
@@ -15,6 +16,11 @@ class CommandContext:
     datastore: DataStore
     stats: dict[str, int]
     server_started_at: int
+    snapshot_manager: SnapshotManager | None = None
+    require_password: str | None = None
+    authenticated: bool = False
+    connection_id: int = 0
+    connection_stats: dict[str, int] = field(default_factory=dict)
 
 
 class Command:
@@ -40,6 +46,9 @@ async def dispatch_command(context: CommandContext, command_parts: list[str]) ->
     if not command_parts:
         return encode_error("ERR empty command")
     name = command_parts[0].upper()
+    if context.require_password and not context.authenticated and name not in {"AUTH", "PING"}:
+        context.stats["command_errors"] += 1
+        return encode_error("NOAUTH Authentication required")
     command_cls = COMMANDS.get(name)
     if command_cls is None:
         context.stats["command_errors"] += 1
@@ -78,7 +87,7 @@ class PingCommand(Command):
         if not args:
             return encode_simple("PONG")
         if len(args) != 1:
-            raise ValueError("ERR wrong number of arguments for 'PING'")
+            raise CommandError("ERR wrong number of arguments for 'PING'")
         return encode_bulk(args[0])
 
 
@@ -86,7 +95,7 @@ class PingCommand(Command):
 class EchoCommand(Command):
     async def execute(self, context: CommandContext, args: list[str]) -> bytes:
         if len(args) != 1:
-            raise ValueError("ERR wrong number of arguments for 'ECHO'")
+            raise CommandError("ERR wrong number of arguments for 'ECHO'")
         return encode_bulk(args[0])
 
 
@@ -158,6 +167,30 @@ class IncrCommand(Command):
         return encode_integer(await context.datastore.incr(args[0]))
 
 
+@register_command("INCRBY")
+class IncrByCommand(Command):
+    async def execute(self, context: CommandContext, args: list[str]) -> bytes:
+        if len(args) != 2:
+            raise CommandError("ERR wrong number of arguments for 'INCRBY'")
+        return encode_integer(await context.datastore.incrby(args[0], _parse_int_arg(args[1], "INCRBY")))
+
+
+@register_command("DECR")
+class DecrCommand(Command):
+    async def execute(self, context: CommandContext, args: list[str]) -> bytes:
+        if len(args) != 1:
+            raise CommandError("ERR wrong number of arguments for 'DECR'")
+        return encode_integer(await context.datastore.incrby(args[0], -1))
+
+
+@register_command("DECRBY")
+class DecrByCommand(Command):
+    async def execute(self, context: CommandContext, args: list[str]) -> bytes:
+        if len(args) != 2:
+            raise CommandError("ERR wrong number of arguments for 'DECRBY'")
+        return encode_integer(await context.datastore.incrby(args[0], -_parse_int_arg(args[1], "DECRBY")))
+
+
 @register_command("FLUSHALL")
 class FlushAllCommand(Command):
     async def execute(self, context: CommandContext, args: list[str]) -> bytes:
@@ -185,6 +218,14 @@ class InfoCommand(Command):
             f"keys:{info['keys']}",
             f"max_keys:{info['max_keys']}",
             f"expiring_keys:{info['expiring_keys']}",
+            f"read_hits:{info['read_hits']}",
+            f"read_misses:{info['read_misses']}",
+            f"expired_keys:{info['expired_keys']}",
+            f"evicted_keys:{info['evicted_keys']}",
+            f"total_reads:{info['total_reads']}",
+            f"total_writes:{info['total_writes']}",
+            f"snapshot_saves:{info['snapshot_saves']}",
+            f"snapshot_loads:{info['snapshot_loads']}",
         ]
         return encode_bulk("\r\n".join(info_lines))
 
@@ -260,8 +301,82 @@ class MSetCommand(Command):
         return encode_simple("OK")
 
 
+@register_command("SETNX")
+class SetNxCommand(Command):
+    async def execute(self, context: CommandContext, args: list[str]) -> bytes:
+        if len(args) != 2:
+            raise CommandError("ERR wrong number of arguments for 'SETNX'")
+        return encode_integer(1 if await context.datastore.setnx(args[0], args[1]) else 0)
+
+
+@register_command("APPEND")
+class AppendCommand(Command):
+    async def execute(self, context: CommandContext, args: list[str]) -> bytes:
+        if len(args) != 2:
+            raise CommandError("ERR wrong number of arguments for 'APPEND'")
+        return encode_integer(await context.datastore.append(args[0], args[1]))
+
+
+@register_command("STRLEN")
+class StrLenCommand(Command):
+    async def execute(self, context: CommandContext, args: list[str]) -> bytes:
+        if len(args) != 1:
+            raise CommandError("ERR wrong number of arguments for 'STRLEN'")
+        return encode_integer(await context.datastore.strlen(args[0]))
+
+
+@register_command("SAVE")
+class SaveCommand(Command):
+    async def execute(self, context: CommandContext, args: list[str]) -> bytes:
+        if args:
+            raise CommandError("ERR wrong number of arguments for 'SAVE'")
+        if context.snapshot_manager is None:
+            raise CommandError("ERR snapshot persistence is not configured")
+        await context.snapshot_manager.save(context.datastore)
+        return encode_simple("OK")
+
+
+@register_command("AUTH")
+class AuthCommand(Command):
+    async def execute(self, context: CommandContext, args: list[str]) -> bytes:
+        if len(args) != 1:
+            raise CommandError("ERR wrong number of arguments for 'AUTH'")
+        if context.require_password is None:
+            context.authenticated = True
+            return encode_simple("OK")
+        if args[0] != context.require_password:
+            raise CommandError("ERR invalid password")
+        context.authenticated = True
+        return encode_simple("OK")
+
+
 def _encode_nullable_array(values: list[str | None]) -> bytes:
     parts = [f"*{len(values)}\r\n".encode("utf-8")]
     for value in values:
         parts.append(encode_bulk(value))
     return b"".join(parts)
+
+
+@register_command("ZSCORE")
+class ZScoreCommand(Command):
+    async def execute(self, context: CommandContext, args: list[str]) -> bytes:
+        if len(args) != 2:
+            raise CommandError("ERR wrong number of arguments for 'ZSCORE'")
+        score = await context.datastore.zscore(args[0], args[1])
+        return encode_bulk(None if score is None else f"{score:g}")
+
+
+@register_command("ZCARD")
+class ZCardCommand(Command):
+    async def execute(self, context: CommandContext, args: list[str]) -> bytes:
+        if len(args) != 1:
+            raise CommandError("ERR wrong number of arguments for 'ZCARD'")
+        return encode_integer(await context.datastore.zcard(args[0]))
+
+
+@register_command("ZREM")
+class ZRemCommand(Command):
+    async def execute(self, context: CommandContext, args: list[str]) -> bytes:
+        if len(args) < 2:
+            raise CommandError("ERR wrong number of arguments for 'ZREM'")
+        return encode_integer(await context.datastore.zrem(args[0], *args[1:]))
