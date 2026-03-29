@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from pyredis.config import load_config
+from pyredis.config import ServerConfig, load_config, validate_config
 
 
 def test_load_config_from_toml(tmp_path: Path):
@@ -54,3 +54,12 @@ def test_load_config_raises_for_missing_file(tmp_path: Path):
     missing = tmp_path / "missing.toml"
     with pytest.raises(FileNotFoundError):
         load_config(str(missing))
+
+
+def test_validate_config_rejects_invalid_values():
+    with pytest.raises(ValueError):
+        validate_config(ServerConfig(port=70000))
+    with pytest.raises(ValueError):
+        validate_config(ServerConfig(metrics_port=-1))
+    with pytest.raises(ValueError):
+        validate_config(ServerConfig(log_format="yaml"))

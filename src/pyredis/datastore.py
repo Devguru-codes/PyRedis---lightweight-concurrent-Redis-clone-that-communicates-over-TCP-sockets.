@@ -82,6 +82,9 @@ class DataStore:
                     deleted += 1
         return deleted
 
+    async def unlink(self, *keys: str) -> int:
+        return await self.delete(*keys)
+
     async def exists(self, *keys: str) -> int:
         async with self._lock:
             self._purge_expired_locked()
@@ -296,6 +299,20 @@ class DataStore:
             self._metrics["read_hits"] += 1
             return record.value.range(start, stop)
 
+    async def zrange_withscores(self, key: str, start: int, stop: int) -> list[tuple[str, float]]:
+        async with self._lock:
+            self._purge_expired_locked()
+            self._metrics["total_reads"] += 1
+            record = self._records.get(key)
+            if record is None:
+                self._metrics["read_misses"] += 1
+                return []
+            if record.kind != "zset":
+                raise WrongTypeError("WRONGTYPE Operation against a key holding the wrong kind of value")
+            self._lru.touch(key)
+            self._metrics["read_hits"] += 1
+            return record.value.range_withscores(start, stop)
+
     async def zcard(self, key: str) -> int:
         async with self._lock:
             self._purge_expired_locked()
@@ -327,6 +344,24 @@ class DataStore:
             else:
                 self._metrics["read_hits"] += 1
             return score
+
+    async def zrank(self, key: str, member: str) -> int | None:
+        async with self._lock:
+            self._purge_expired_locked()
+            self._metrics["total_reads"] += 1
+            record = self._records.get(key)
+            if record is None:
+                self._metrics["read_misses"] += 1
+                return None
+            if record.kind != "zset":
+                raise WrongTypeError("WRONGTYPE Operation against a key holding the wrong kind of value")
+            self._lru.touch(key)
+            rank = record.value.rank(member)
+            if rank is None:
+                self._metrics["read_misses"] += 1
+            else:
+                self._metrics["read_hits"] += 1
+            return rank
 
     async def zrem(self, key: str, *members: str) -> int:
         async with self._lock:
@@ -453,6 +488,24 @@ class DataStore:
             self._lru.remove(source)
             self._lru.touch(target)
 
+    async def renamenx(self, source: str, target: str) -> bool:
+        async with self._lock:
+            self._purge_expired_locked()
+            self._metrics["total_writes"] += 1
+            record = self._records.get(source)
+            if record is None:
+                raise CommandError("ERR no such key")
+            if source != target and target in self._records:
+                return False
+            if source == target:
+                self._lru.touch(source)
+                return True
+            self._records[target] = record
+            self._records.pop(source, None)
+            self._lru.remove(source)
+            self._lru.touch(target)
+            return True
+
     async def keys(self, pattern: str) -> list[str]:
         async with self._lock:
             self._purge_expired_locked()
@@ -465,6 +518,23 @@ class DataStore:
             for key in matched:
                 self._lru.touch(key)
             return matched
+
+    async def scan(self, cursor: int, pattern: str = "*", count: int = 10) -> tuple[int, list[str]]:
+        async with self._lock:
+            self._purge_expired_locked()
+            self._metrics["total_reads"] += 1
+            all_keys = [key for key in sorted(self._records) if fnmatch.fnmatchcase(key, pattern)]
+            if not all_keys:
+                self._metrics["read_misses"] += 1
+                return 0, []
+            start = max(cursor, 0)
+            end = min(start + max(count, 1), len(all_keys))
+            keys = all_keys[start:end]
+            next_cursor = 0 if end >= len(all_keys) else end
+            self._metrics["read_hits"] += len(keys)
+            for key in keys:
+                self._lru.touch(key)
+            return next_cursor, keys
 
     def _purge_expired_locked(self) -> int:
         removed = 0

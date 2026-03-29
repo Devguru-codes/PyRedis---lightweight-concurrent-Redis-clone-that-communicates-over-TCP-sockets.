@@ -8,6 +8,7 @@ htmlcov
 data
 benchmarks
 benchmark.json
+logs
 *.pyc
 *.pyo
 *.pyd

@@ -15,3 +15,5 @@ metrics_enabled = false
 metrics_host = "127.0.0.1"
 metrics_port = 9101
 log_level = "INFO"
+log_format = "plain"
+scan_default_count = 10

@@ -117,6 +117,15 @@ def _record_latency(stats: dict[str, object], command_name: str, latency_us: flo
     totals = stats.setdefault("per_command_latency_us_total", {})
     assert isinstance(totals, dict)
     totals[command_name] = round(float(totals.get(command_name, 0.0)) + latency_us, 2)
+    buckets = stats.setdefault("per_command_latency_bucket_counts", {})
+    assert isinstance(buckets, dict)
+    command_buckets = buckets.setdefault(command_name, {})
+    assert isinstance(command_buckets, dict)
+    for bucket in (100, 500, 1_000, 5_000, 10_000, 50_000):
+        if latency_us <= bucket:
+            key = str(bucket)
+            command_buckets[key] = int(command_buckets.get(key, 0)) + 1
+            break
 
 
 def _parse_int_arg(value: str, command_name: str, message: str | None = None) -> int:
@@ -211,6 +220,16 @@ class DelCommand(Command):
         if not args:
             raise CommandError("ERR wrong number of arguments for 'DEL'")
         return encode_integer(await context.datastore.delete(*args))
+
+
+@register_command("UNLINK")
+class UnlinkCommand(Command):
+    is_write = True
+
+    async def execute(self, context: CommandContext, args: list[str]) -> bytes:
+        if not args:
+            raise CommandError("ERR wrong number of arguments for 'UNLINK'")
+        return encode_integer(await context.datastore.unlink(*args))
 
 
 @register_command("EXISTS")
@@ -359,6 +378,29 @@ class KeysCommand(Command):
         return encode_array(await context.datastore.keys(args[0]))
 
 
+@register_command("SCAN")
+class ScanCommand(Command):
+    async def execute(self, context: CommandContext, args: list[str]) -> bytes:
+        if not args:
+            raise CommandError("ERR wrong number of arguments for 'SCAN'")
+        cursor = _parse_int_arg(args[0], "SCAN")
+        pattern = "*"
+        count = 10
+        index = 1
+        while index < len(args):
+            option = args[index].upper()
+            if option == "MATCH" and index + 1 < len(args):
+                pattern = args[index + 1]
+                index += 2
+            elif option == "COUNT" and index + 1 < len(args):
+                count = _parse_int_arg(args[index + 1], "SCAN")
+                index += 2
+            else:
+                raise CommandError("ERR syntax error")
+        next_cursor, keys = await context.datastore.scan(cursor, pattern=pattern, count=count)
+        return _encode_raw_array([encode_bulk(str(next_cursor)), encode_array(keys)])
+
+
 @register_command("RENAME")
 class RenameCommand(Command):
     is_write = True
@@ -368,6 +410,16 @@ class RenameCommand(Command):
             raise CommandError("ERR wrong number of arguments for 'RENAME'")
         await context.datastore.rename(args[0], args[1])
         return encode_simple("OK")
+
+
+@register_command("RENAMENX")
+class RenameNxCommand(Command):
+    is_write = True
+
+    async def execute(self, context: CommandContext, args: list[str]) -> bytes:
+        if len(args) != 2:
+            raise CommandError("ERR wrong number of arguments for 'RENAMENX'")
+        return encode_integer(1 if await context.datastore.renamenx(args[0], args[1]) else 0)
 
 
 @register_command("FLUSHALL")
@@ -555,13 +607,19 @@ class ZAddCommand(Command):
 @register_command("ZRANGE")
 class ZRangeCommand(Command):
     async def execute(self, context: CommandContext, args: list[str]) -> bytes:
-        if len(args) != 3:
+        if len(args) not in (3, 4):
             raise CommandError("ERR wrong number of arguments for 'ZRANGE'")
-        members = await context.datastore.zrange(
-            args[0],
-            _parse_int_arg(args[1], "ZRANGE"),
-            _parse_int_arg(args[2], "ZRANGE"),
-        )
+        start = _parse_int_arg(args[1], "ZRANGE")
+        stop = _parse_int_arg(args[2], "ZRANGE")
+        if len(args) == 4:
+            if args[3].upper() != "WITHSCORES":
+                raise CommandError("ERR syntax error")
+            items = await context.datastore.zrange_withscores(args[0], start, stop)
+            flattened: list[str] = []
+            for member, score in items:
+                flattened.extend([member, f"{score:g}"])
+            return encode_array(flattened)
+        members = await context.datastore.zrange(args[0], start, stop)
         return encode_array(members)
 
 
@@ -580,6 +638,15 @@ class ZCardCommand(Command):
         if len(args) != 1:
             raise CommandError("ERR wrong number of arguments for 'ZCARD'")
         return encode_integer(await context.datastore.zcard(args[0]))
+
+
+@register_command("ZRANK")
+class ZRankCommand(Command):
+    async def execute(self, context: CommandContext, args: list[str]) -> bytes:
+        if len(args) != 2:
+            raise CommandError("ERR wrong number of arguments for 'ZRANK'")
+        rank = await context.datastore.zrank(args[0], args[1])
+        return encode_bulk(None if rank is None else str(rank))
 
 
 @register_command("ZREM")

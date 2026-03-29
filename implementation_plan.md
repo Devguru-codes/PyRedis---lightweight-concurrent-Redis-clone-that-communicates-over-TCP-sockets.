@@ -106,3 +106,26 @@ Build a lightweight in-memory Redis-inspired datastore with:
 - [x] Phase 10 transactions and request flow completed
 - [x] Phase 11 observability and runtime UX completed
 - [x] Phase 12 CI restoration and extended validation completed
+
+## Phase 13: Advanced Redis Compatibility
+- Add `RENAMENX`, `UNLINK`, and cursor-based `SCAN`
+- Add `ZRANK`
+- Extend `ZRANGE` with `WITHSCORES`
+- Add pipelining-oriented request coverage beyond one-command-at-a-time integration tests
+
+## Phase 14: Persistence Coordination
+- Improve AOF rewrite so writes during compaction are preserved in the rewritten file
+- Coordinate background snapshots to avoid overlapping snapshot jobs
+- Keep snapshot/AOF maintenance safe under concurrent write load
+
+## Phase 15: Metrics And Hardening
+- Add Prometheus histogram-style latency buckets
+- Add config validation for ports, intervals, and limits
+- Add graceful shutdown signal handling
+- Add configurable log formatting options
+- Update Docker, CI, and docs for the hardened runtime model
+
+## Milestone 3 Checklist
+- [x] Phase 13 advanced Redis compatibility completed
+- [x] Phase 14 persistence coordination completed
+- [x] Phase 15 metrics and hardening completed

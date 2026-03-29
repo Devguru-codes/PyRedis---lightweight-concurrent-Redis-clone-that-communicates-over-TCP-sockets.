@@ -28,6 +28,8 @@ class ServerConfig:
     metrics_host: str = "127.0.0.1"
     metrics_port: int = 9101
     log_level: str = "INFO"
+    log_format: str = "plain"
+    scan_default_count: int = 10
 
 
 def load_config(config_path: str | None) -> ServerConfig:
@@ -40,4 +42,30 @@ def load_config(config_path: str | None) -> ServerConfig:
     server_data = data.get("server", data)
     valid_fields = {field.name for field in fields(ServerConfig)}
     filtered = {key: value for key, value in server_data.items() if key in valid_fields}
-    return ServerConfig(**filtered)
+    return validate_config(ServerConfig(**filtered))
+
+
+def validate_config(config: ServerConfig) -> ServerConfig:
+    if not (0 <= config.port <= 65535):
+        raise ValueError("port must be between 0 and 65535")
+    if not (0 <= config.metrics_port <= 65535):
+        raise ValueError("metrics_port must be between 0 and 65535")
+    if config.max_keys <= 0:
+        raise ValueError("max_keys must be greater than 0")
+    if config.ttl_check_interval <= 0:
+        raise ValueError("ttl_check_interval must be greater than 0")
+    if config.client_idle_timeout <= 0:
+        raise ValueError("client_idle_timeout must be greater than 0")
+    if config.max_command_parts <= 0:
+        raise ValueError("max_command_parts must be greater than 0")
+    if config.max_bulk_length <= 0:
+        raise ValueError("max_bulk_length must be greater than 0")
+    if config.snapshot_interval_seconds < 0:
+        raise ValueError("snapshot_interval_seconds can not be negative")
+    if config.scan_default_count <= 0:
+        raise ValueError("scan_default_count must be greater than 0")
+    if config.log_level.upper() not in {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}:
+        raise ValueError("log_level must be a standard logging level")
+    if config.log_format.lower() not in {"plain", "json"}:
+        raise ValueError("log_format must be either 'plain' or 'json'")
+    return config

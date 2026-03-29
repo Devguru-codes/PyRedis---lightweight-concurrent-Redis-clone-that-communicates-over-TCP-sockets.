@@ -51,6 +51,7 @@ PyRedis/
     |-- test_config.py
     |-- test_datastore.py
     |-- test_integration.py
+    |-- test_persistence.py
     `-- test_protocol.py
 ```
 
@@ -62,7 +63,10 @@ PyRedis/
 - `DEL key [key ...]`
 - `EXISTS key [key ...]`
 - `KEYS pattern`
+- `SCAN cursor [MATCH pattern] [COUNT n]`
 - `RENAME source target`
+- `RENAMENX source target`
+- `UNLINK key [key ...]`
 - `EXPIRE key seconds`
 - `PEXPIRE key milliseconds`
 - `TTL key`
@@ -90,7 +94,9 @@ PyRedis/
 - `DISCARD`
 - `ZADD key score member [score member ...]`
 - `ZRANGE key start stop`
+- `ZRANGE key start stop WITHSCORES`
 - `ZCARD key`
+- `ZRANK key member`
 - `ZSCORE key member`
 - `ZREM key member [member ...]`
 
@@ -114,6 +120,12 @@ Or override values directly:
 python -m pyredis --host 127.0.0.1 --port 6380 --snapshot-path data\dump.json --appendonly-enabled --appendonly-path data\appendonly.aof
 ```
 
+Useful hardening options:
+
+```powershell
+python -m pyredis --config pyredis.toml --metrics-enabled --metrics-port 9101 --log-format json --log-level DEBUG
+```
+
 ## Run A Demo Client
 Open another terminal and run:
 
@@ -128,8 +140,9 @@ pytest
 pytest tests\test_protocol.py
 pytest tests\test_integration.py -k snapshot
 pytest tests\test_integration.py -k "multi or aof or metrics"
+pytest tests\test_integration.py -k "scan or pipeline"
 python scripts\stress_client.py --host 127.0.0.1 --port 6380 --requests 400 --concurrency 50
-python scripts\stress_client.py --host 127.0.0.1 --port 6380 --requests 400 --concurrency 50 --json-out benchmark.json
+python scripts\stress_client.py --host 127.0.0.1 --port 6380 --requests 400 --concurrency 50 --pipeline-depth 4 --json-out benchmark.json
 ```
 
 ## Test Coverage Highlights
@@ -138,6 +151,7 @@ python scripts\stress_client.py --host 127.0.0.1 --port 6380 --requests 400 --co
 - append-only replay and background snapshot behavior
 - auth enforcement and post-auth command flow
 - transaction queueing and `EXEC` response handling
+- `SCAN`, pipelined requests, and advanced keyspace/ZSET command behavior
 - protocol parsing edge cases and malformed RESP payloads
 - benchmark report generation
 - metrics endpoint output validation
@@ -175,6 +189,7 @@ This starts:
 - a bind-mounted `data/` directory for snapshots
 - append-only logs and replay state under `data/`
 - a bind-mounted `benchmarks/` directory for load-test JSON reports
+- an optional bind-mounted `logs/` directory for runtime logs
 
 ## Docker Files
 The project includes:
@@ -187,6 +202,7 @@ The project includes:
 - snapshots are written under `/app/data`
 - append-only logs can be written under `/app/data/appendonly.aof`
 - metrics can be exposed on port `9101`
+- compose load tests use pipelined requests by default
 - compose load tests write benchmark artifacts under `/app/benchmarks`
 - local runtime artifacts such as `data/`, `benchmarks/`, and `benchmark.json` are ignored by git
 
@@ -209,8 +225,9 @@ The project includes:
 - `BGSAVE` schedules a background snapshot
 - Snapshots can be auto-loaded on startup
 - When AOF is enabled, mutating commands are appended and replayed on startup
+- AOF rewrite now preserves writes that happen during compaction
 - `INFO` now exposes request, hit/miss, expiration, eviction, per-command, and snapshot metrics
-- When metrics are enabled, `GET /metrics` exposes Prometheus-style counters and gauges
+- When metrics are enabled, `GET /metrics` exposes Prometheus-style counters, gauges, and latency histogram buckets
 
 ## CI
 - GitHub Actions runs linting, the full pytest suite, and a benchmark smoke test from [.github/workflows/ci.yml](C:\Users\devgu\Downloads\PyRedis\.github\workflows\ci.yml)
@@ -220,3 +237,8 @@ The project includes:
 - queued commands return `QUEUED`
 - `EXEC` runs the queued commands and returns an array of raw RESP replies
 - `DISCARD` clears the queued transaction without applying it
+
+## Hardening
+- config validation rejects invalid ports, intervals, and logging formats
+- graceful shutdown is handled through signal-aware server startup
+- logging supports `plain` and `json` output formats

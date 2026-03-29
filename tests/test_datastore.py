@@ -146,6 +146,23 @@ async def test_getset_pttl_pexpire_keys_and_rename():
 
 
 @pytest.mark.asyncio
+async def test_scan_renamenx_unlink_and_zrank_withscores():
+    store = DataStore(max_keys=20)
+    await store.mset([("item:1", "a"), ("item:2", "b"), ("other", "c")])
+    cursor, keys = await store.scan(0, pattern="item:*", count=1)
+    assert keys == ["item:1"]
+    cursor2, keys2 = await store.scan(cursor, pattern="item:*", count=2)
+    assert cursor2 == 0
+    assert keys2 == ["item:2"]
+    assert await store.renamenx("item:1", "item:3") is True
+    assert await store.renamenx("item:2", "item:3") is False
+    assert await store.unlink("item:2", "missing") == 1
+    await store.zadd("leaders", [(1.0, "alice"), (2.0, "bob")])
+    assert await store.zrank("leaders", "bob") == 1
+    assert await store.zrange_withscores("leaders", 0, -1) == [("alice", 1.0), ("bob", 2.0)]
+
+
+@pytest.mark.asyncio
 async def test_zset_score_card_and_remove():
     store = DataStore(max_keys=5)
     await store.zadd("leaders", [(2.0, "bob"), (1.0, "alice")])

@@ -10,6 +10,7 @@ services:
     volumes:
       - ./data:/app/data
       - ./benchmarks:/app/benchmarks
+      - ./logs:/app/logs
     healthcheck:
       test: ["CMD", "python", "-c", "import socket; s=socket.create_connection(('127.0.0.1', 6380), timeout=2); s.close()"]
       interval: 5s
@@ -23,7 +24,7 @@ services:
         condition: service_healthy
     volumes:
       - ./benchmarks:/app/benchmarks
-    command: ["python", "scripts/stress_client.py", "--host", "pyredis", "--port", "6380", "--requests", "200", "--concurrency", "40", "--json-out", "/app/benchmarks/loadtest-a.json"]
+    command: ["python", "scripts/stress_client.py", "--host", "pyredis", "--port", "6380", "--requests", "200", "--concurrency", "40", "--pipeline-depth", "4", "--json-out", "/app/benchmarks/loadtest-a.json"]
 
   loadtest-b:
     build: .
@@ -32,4 +33,4 @@ services:
         condition: service_healthy
     volumes:
       - ./benchmarks:/app/benchmarks
-    command: ["python", "scripts/stress_client.py", "--host", "pyredis", "--port", "6380", "--requests", "200", "--concurrency", "40", "--json-out", "/app/benchmarks/loadtest-b.json"]
+    command: ["python", "scripts/stress_client.py", "--host", "pyredis", "--port", "6380", "--requests", "200", "--concurrency", "40", "--pipeline-depth", "4", "--json-out", "/app/benchmarks/loadtest-b.json"]

@@ -26,6 +26,7 @@ jobs:
           python -m pyredis --host 127.0.0.1 --port 6380 --metrics-enabled --metrics-port 9101 &
           SERVER_PID=$!
           sleep 2
-          python scripts/stress_client.py --host 127.0.0.1 --port 6380 --requests 100 --concurrency 20 --p95-threshold-ms 200 --json-out benchmark.json
+          python scripts/stress_client.py --host 127.0.0.1 --port 6380 --requests 100 --concurrency 20 --pipeline-depth 4 --p95-threshold-ms 250 --json-out benchmark.json
           test -f benchmark.json
+          curl -sf http://127.0.0.1:9101/metrics | grep pyredis_commands_processed
           kill $SERVER_PID

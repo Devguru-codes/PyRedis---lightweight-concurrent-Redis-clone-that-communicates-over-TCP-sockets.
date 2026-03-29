@@ -92,6 +92,23 @@ async def test_additional_redis_commands(redis_client):
     assert int(pttl_response[1:-2]) > 0
     assert await send_command(writer, reader, "RENAME", "alpha", "beta") == b"+OK\r\n"
     assert await send_command(writer, reader, "KEYS", "b*") == b"*1\r\n$4\r\nbeta\r\n"
+    assert await send_command(writer, reader, "RENAMENX", "beta", "gamma") == b":1\r\n"
+    assert await send_command(writer, reader, "UNLINK", "gamma") == b":1\r\n"
+
+
+@pytest.mark.asyncio
+async def test_scan_zrank_and_zrange_withscores(redis_client):
+    reader, writer = redis_client
+    await send_command(writer, reader, "MSET", "item:1", "a", "item:2", "b", "note", "c")
+    scan_response = await send_command(writer, reader, "SCAN", "0", "MATCH", "item:*", "COUNT", "10")
+    assert scan_response.startswith(b"*2\r\n")
+    assert b"item:1" in scan_response and b"item:2" in scan_response
+    await send_command(writer, reader, "ZADD", "leaders", "1", "alice", "2", "bob")
+    assert await send_command(writer, reader, "ZRANK", "leaders", "bob") == b"$1\r\n1\r\n"
+    assert (
+        await send_command(writer, reader, "ZRANGE", "leaders", "0", "-1", "WITHSCORES")
+        == b"*4\r\n$5\r\nalice\r\n$1\r\n1\r\n$3\r\nbob\r\n$1\r\n2\r\n"
+    )
 
 
 @pytest.mark.asyncio
@@ -295,6 +312,7 @@ async def test_append_only_replay_and_metrics_endpoint(durable_server, tmp_path:
         metrics_payload = await metrics_reader.read()
         assert b"pyredis_commands_processed" in metrics_payload
         assert b'pyredis_command_count{command="get"}' in metrics_payload
+        assert b'pyredis_command_latency_us_bucket{command="get",le="100"}' in metrics_payload
     finally:
         writer2.close()
         metrics_writer.close()
@@ -318,3 +336,27 @@ async def test_concurrent_clients(redis_server):
 
     results = await asyncio.gather(*(worker(index) for index in range(3)))
     assert results == [b"$1\r\n0\r\n", b"$1\r\n1\r\n", b"$1\r\n2\r\n"]
+
+
+@pytest.mark.asyncio
+async def test_pipelined_requests(redis_server):
+    host, port, _server = redis_server
+    reader, writer = await asyncio.open_connection(host, port)
+    try:
+        payload = (
+            b"*3\r\n$3\r\nSET\r\n$4\r\npipe\r\n$1\r\n1\r\n"
+            b"*2\r\n$3\r\nGET\r\n$4\r\npipe\r\n"
+            b"*3\r\n$6\r\nINCRBY\r\n$4\r\npipe\r\n$1\r\n4\r\n"
+            b"*2\r\n$3\r\nGET\r\n$4\r\npipe\r\n"
+        )
+        writer.write(payload)
+        await writer.drain()
+        assert await reader.readuntil(b"\r\n") == b"+OK\r\n"
+        assert await reader.readuntil(b"\r\n") == b"$1\r\n"
+        assert await reader.readexactly(3) == b"1\r\n"
+        assert await reader.readuntil(b"\r\n") == b":5\r\n"
+        assert await reader.readuntil(b"\r\n") == b"$1\r\n"
+        assert await reader.readexactly(3) == b"5\r\n"
+    finally:
+        writer.close()
+        await writer.wait_closed()

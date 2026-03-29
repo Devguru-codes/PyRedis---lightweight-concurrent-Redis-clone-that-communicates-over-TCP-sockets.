@@ -33,6 +33,7 @@ class PyRedisServer:
             "last_command_latency_us": 0.0,
             "per_command_counts": {},
             "per_command_latency_us_total": {},
+            "per_command_latency_bucket_counts": {},
         }
         self._server: asyncio.AbstractServer | None = None
         self._metrics_server: asyncio.AbstractServer | None = None
@@ -226,6 +227,8 @@ class PyRedisServer:
         assert isinstance(command_counts, dict)
         latency_totals = self.stats.get("per_command_latency_us_total", {})
         assert isinstance(latency_totals, dict)
+        latency_buckets = self.stats.get("per_command_latency_bucket_counts", {})
+        assert isinstance(latency_buckets, dict)
         for name, count in sorted(command_counts.items()):
             lines.append(
                 f'pyredis_command_count{{command="{name.lower()}"}} {count}'
@@ -233,5 +236,16 @@ class PyRedisServer:
         for name, total in sorted(latency_totals.items()):
             lines.append(
                 f'pyredis_command_latency_us_total{{command="{name.lower()}"}} {total}'
+            )
+        for name, buckets in sorted(latency_buckets.items()):
+            assert isinstance(buckets, dict)
+            cumulative = 0
+            for upper_bound in sorted((int(bound) for bound in buckets)):
+                cumulative += int(buckets[str(upper_bound)])
+                lines.append(
+                    f'pyredis_command_latency_us_bucket{{command="{name.lower()}",le="{upper_bound}"}} {cumulative}'
+                )
+            lines.append(
+                f'pyredis_command_latency_us_bucket{{command="{name.lower()}",le="+Inf"}} {command_counts.get(name, 0)}'
             )
         return ("\n".join(lines) + "\n").encode("utf-8")

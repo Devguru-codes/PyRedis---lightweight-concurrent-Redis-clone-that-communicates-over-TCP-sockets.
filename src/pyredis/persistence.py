@@ -15,10 +15,12 @@ class SnapshotManager:
     def __init__(self, path: str) -> None:
         self.path = Path(path)
         self._save_task: asyncio.Task | None = None
+        self._save_lock = asyncio.Lock()
 
     async def save(self, datastore: DataStore) -> None:
-        payload = await datastore.export_state()
-        await asyncio.to_thread(self._write_snapshot, payload)
+        async with self._save_lock:
+            payload = await datastore.export_state()
+            await asyncio.to_thread(self._write_snapshot, payload)
 
     async def bgsave(self, datastore: DataStore) -> bool:
         if self._save_task is not None and not self._save_task.done():
@@ -52,9 +54,13 @@ class AppendOnlyManager:
         self.path = Path(path)
         self.fsync_always = fsync_always
         self._lock = asyncio.Lock()
+        self._rewriting = False
+        self._rewrite_buffer: list[list[str]] = []
 
     async def append(self, command_parts: list[str]) -> None:
         async with self._lock:
+            if self._rewriting:
+                self._rewrite_buffer.append(command_parts.copy())
             await asyncio.to_thread(self._append_sync, command_parts)
 
     async def replay(self, datastore: DataStore) -> bool:
@@ -66,6 +72,9 @@ class AppendOnlyManager:
         return True
 
     async def rewrite_from_snapshot(self, datastore: DataStore) -> None:
+        async with self._lock:
+            self._rewriting = True
+            self._rewrite_buffer = []
         payload = await datastore.export_state()
         commands: list[list[str]] = []
         for key, record in payload.get("records", {}).items():
@@ -81,8 +90,16 @@ class AppendOnlyManager:
                     zadd_command.extend([str(item["score"]), item["member"]])
                 if len(zadd_command) > 2:
                     commands.append(zadd_command)
-        async with self._lock:
-            await asyncio.to_thread(self._rewrite_sync, commands)
+        while True:
+            async with self._lock:
+                buffered = list(self._rewrite_buffer)
+                self._rewrite_buffer = []
+            await asyncio.to_thread(self._rewrite_sync, commands + buffered)
+            async with self._lock:
+                if not self._rewrite_buffer:
+                    self._rewriting = False
+                    break
+                commands.extend(buffered)
 
     def _append_sync(self, command_parts: list[str]) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -125,6 +142,8 @@ class AppendOnlyManager:
             await datastore.set(args[0], args[1], ex=ex)
         elif name == "DEL":
             await datastore.delete(*args)
+        elif name == "UNLINK":
+            await datastore.unlink(*args)
         elif name == "EXPIRE":
             await datastore.expire(args[0], int(args[1]))
         elif name == "PEXPIRE":
@@ -156,3 +175,5 @@ class AppendOnlyManager:
             await datastore.zrem(args[0], *args[1:])
         elif name == "RENAME":
             await datastore.rename(args[0], args[1])
+        elif name == "RENAMENX":
+            await datastore.renamenx(args[0], args[1])

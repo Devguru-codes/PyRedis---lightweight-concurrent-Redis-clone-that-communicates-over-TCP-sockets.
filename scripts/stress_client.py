@@ -34,6 +34,29 @@ async def perform_request(host: str, port: int, index: int) -> float:
     return elapsed_ms
 
 
+async def perform_pipelined_request(host: str, port: int, index: int, pipeline_depth: int) -> float:
+    reader, writer = await asyncio.open_connection(host, port)
+    started = time.perf_counter()
+    commands: list[tuple[str, ...]] = []
+    for offset in range(pipeline_depth):
+        current = index * pipeline_depth + offset
+        commands.append(("SET", f"pipe:{current}", str(current)))
+        commands.append(("GET", f"pipe:{current}"))
+    for command in commands:
+        writer.write(resp_array(*command))
+    await writer.drain()
+    for command in commands:
+        header = await reader.readuntil(b"\r\n")
+        if command[0] == "GET":
+            if header != b"$-1\r\n":
+                size = int(header[1:-2])
+                await reader.readexactly(size + 2)
+    elapsed_ms = (time.perf_counter() - started) * 1000
+    writer.close()
+    await writer.wait_closed()
+    return elapsed_ms
+
+
 async def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--host", default="127.0.0.1")
@@ -42,12 +65,15 @@ async def main() -> None:
     parser.add_argument("--concurrency", type=int, default=50)
     parser.add_argument("--p95-threshold-ms", type=float, default=100.0)
     parser.add_argument("--json-out", default=None)
+    parser.add_argument("--pipeline-depth", type=int, default=1)
     args = parser.parse_args()
 
     semaphore = asyncio.Semaphore(args.concurrency)
 
     async def runner(index: int) -> float:
         async with semaphore:
+            if args.pipeline_depth > 1:
+                return await perform_pipelined_request(args.host, args.port, index, args.pipeline_depth)
             return await perform_request(args.host, args.port, index)
 
     latencies = await asyncio.gather(*(runner(i) for i in range(args.requests)))
@@ -60,13 +86,14 @@ async def main() -> None:
     report = {
         "requests": args.requests,
         "concurrency": args.concurrency,
+        "pipeline_depth": args.pipeline_depth,
         "mean_ms": round(statistics.mean(latencies), 2),
         "p50_ms": round(p50, 2),
         "p95_ms": round(p95, 2),
         "p99_ms": round(p99, 2),
     }
     print(
-        f"requests={args.requests} concurrency={args.concurrency} "
+        f"requests={args.requests} concurrency={args.concurrency} pipeline_depth={args.pipeline_depth} "
         f"p50_ms={p50:.2f} p95_ms={p95:.2f} p99_ms={p99:.2f}"
     )
     if args.json_out:

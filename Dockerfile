@@ -9,7 +9,7 @@ ENV PYREDIS_CONFIG=/app/pyredis.toml
 COPY . .
 
 RUN pip install --no-cache-dir -r requirements.txt && pip install --no-cache-dir -e .
-RUN mkdir -p /app/data /app/benchmarks
+RUN mkdir -p /app/data /app/benchmarks /app/logs
 
 EXPOSE 6380 9101
 
