@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import logging
 from dataclasses import replace
 
 from .config import load_config
@@ -21,6 +22,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--snapshot-path", default=None)
     parser.add_argument("--snapshot-on-shutdown", action="store_true")
     parser.add_argument("--disable-snapshot-load", action="store_true")
+    parser.add_argument("--snapshot-interval-seconds", type=float, default=None)
+    parser.add_argument("--appendonly-enabled", action="store_true")
+    parser.add_argument("--appendonly-path", default=None)
+    parser.add_argument("--appendfsync-always", action="store_true")
+    parser.add_argument("--metrics-enabled", action="store_true")
+    parser.add_argument("--metrics-host", default=None)
+    parser.add_argument("--metrics-port", type=int, default=None)
+    parser.add_argument("--log-level", default=None)
     return parser.parse_args()
 
 
@@ -34,6 +43,11 @@ async def async_main() -> None:
         "ttl_check_interval": args.ttl_check_interval,
         "require_password": args.require_password,
         "snapshot_path": args.snapshot_path,
+        "snapshot_interval_seconds": args.snapshot_interval_seconds,
+        "appendonly_path": args.appendonly_path,
+        "metrics_host": args.metrics_host,
+        "metrics_port": args.metrics_port,
+        "log_level": args.log_level,
     }
     for key, value in overrides.items():
         if value is not None:
@@ -42,6 +56,13 @@ async def async_main() -> None:
         config.snapshot_on_shutdown = True
     if args.disable_snapshot_load:
         config.load_snapshot_on_startup = False
+    if args.appendonly_enabled:
+        config.appendonly_enabled = True
+    if args.appendfsync_always:
+        config.appendfsync_always = True
+    if args.metrics_enabled:
+        config.metrics_enabled = True
+    logging.basicConfig(level=getattr(logging, config.log_level.upper(), logging.INFO))
     server = PyRedisServer(replace(config))
     try:
         await server.serve_forever()

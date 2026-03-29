@@ -11,6 +11,6 @@ COPY . .
 RUN pip install --no-cache-dir -r requirements.txt && pip install --no-cache-dir -e .
 RUN mkdir -p /app/data /app/benchmarks
 
-EXPOSE 6380
+EXPOSE 6380 9101
 
 CMD ["sh", "-c", "python -m pyredis --config ${PYREDIS_CONFIG} --host 0.0.0.0 --port 6380"]

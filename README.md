@@ -11,7 +11,10 @@ PyRedis is a lightweight Redis-inspired in-memory key-value datastore built from
 - Sorted sets implemented with a skip list
 - Stronger protocol and command error handling
 - Snapshot persistence support
+- Append-only logging with replay on startup
+- Transaction support with `MULTI` / `EXEC` / `DISCARD`
 - Authentication and TOML config support
+- Prometheus-style metrics endpoint and structured request logging
 - Richer server metrics in `INFO`
 - Socket-level integration tests using `pytest-asyncio`
 - Docker, `docker-compose`, and GitHub Actions CI support
@@ -25,6 +28,7 @@ PyRedis/
 |-- pyproject.toml
 |-- Dockerfile
 |-- docker-compose.yml
+|-- .github/workflows/ci.yml
 |-- scripts/
 |   |-- async_client_demo.py
 |   |-- build_image.ps1
@@ -57,12 +61,17 @@ PyRedis/
 - `GET key`
 - `DEL key [key ...]`
 - `EXISTS key [key ...]`
+- `KEYS pattern`
+- `RENAME source target`
 - `EXPIRE key seconds`
+- `PEXPIRE key milliseconds`
 - `TTL key`
+- `PTTL key`
 - `INCR key`
 - `INCRBY key amount`
 - `DECR key`
 - `DECRBY key amount`
+- `GETSET key value`
 - `MSET key value [key value ...]`
 - `MGET key [key ...]`
 - `SETNX key value`
@@ -75,6 +84,10 @@ PyRedis/
 - `PERSIST key`
 - `AUTH password`
 - `SAVE`
+- `BGSAVE`
+- `MULTI`
+- `EXEC`
+- `DISCARD`
 - `ZADD key score member [score member ...]`
 - `ZRANGE key start stop`
 - `ZCARD key`
@@ -92,13 +105,13 @@ python -m pip install -e .
 
 ## Run The Server
 ```powershell
-python -m pyredis --config pyredis.toml
+python -m pyredis --config pyredis.toml --metrics-enabled --metrics-port 9101
 ```
 
 Or override values directly:
 
 ```powershell
-python -m pyredis --host 127.0.0.1 --port 6380 --snapshot-path data\dump.json
+python -m pyredis --host 127.0.0.1 --port 6380 --snapshot-path data\dump.json --appendonly-enabled --appendonly-path data\appendonly.aof
 ```
 
 ## Run A Demo Client
@@ -114,6 +127,7 @@ ruff check .
 pytest
 pytest tests\test_protocol.py
 pytest tests\test_integration.py -k snapshot
+pytest tests\test_integration.py -k "multi or aof or metrics"
 python scripts\stress_client.py --host 127.0.0.1 --port 6380 --requests 400 --concurrency 50
 python scripts\stress_client.py --host 127.0.0.1 --port 6380 --requests 400 --concurrency 50 --json-out benchmark.json
 ```
@@ -121,9 +135,12 @@ python scripts\stress_client.py --host 127.0.0.1 --port 6380 --requests 400 --co
 ## Test Coverage Highlights
 - config loading and missing-file handling
 - snapshot export/import and on-disk snapshot validation
+- append-only replay and background snapshot behavior
 - auth enforcement and post-auth command flow
+- transaction queueing and `EXEC` response handling
 - protocol parsing edge cases and malformed RESP payloads
 - benchmark report generation
+- metrics endpoint output validation
 - key metrics such as hit/miss, eviction, and expiration counters
 
 ## Docker Image Build
@@ -143,7 +160,7 @@ powershell -ExecutionPolicy Bypass -File .\scripts\build_image.ps1
 Run the server container directly:
 
 ```powershell
-docker run --rm -p 6380:6380 -v ${PWD}\data:/app/data pyredis:latest
+docker run --rm -p 6380:6380 -p 9101:9101 -v ${PWD}\data:/app/data pyredis:latest
 ```
 
 Run the full compose stack:
@@ -156,6 +173,7 @@ This starts:
 - `pyredis` server container
 - two load-test client containers that send concurrent requests
 - a bind-mounted `data/` directory for snapshots
+- append-only logs and replay state under `data/`
 - a bind-mounted `benchmarks/` directory for load-test JSON reports
 
 ## Docker Files
@@ -167,7 +185,10 @@ The project includes:
 ## Docker Notes
 - the container starts with `pyredis.toml` by default via `PYREDIS_CONFIG`
 - snapshots are written under `/app/data`
+- append-only logs can be written under `/app/data/appendonly.aof`
+- metrics can be exposed on port `9101`
 - compose load tests write benchmark artifacts under `/app/benchmarks`
+- local runtime artifacts such as `data/`, `benchmarks/`, and `benchmark.json` are ignored by git
 
 ## Design Notes
 - `lru.py`: tracks most/least recently used keys using a doubly linked list and hash map
@@ -185,5 +206,17 @@ The project includes:
 
 ## Persistence And Metrics
 - `SAVE` writes a snapshot to the configured `snapshot_path`
+- `BGSAVE` schedules a background snapshot
 - Snapshots can be auto-loaded on startup
-- `INFO` now exposes request, hit/miss, expiration, eviction, and snapshot metrics
+- When AOF is enabled, mutating commands are appended and replayed on startup
+- `INFO` now exposes request, hit/miss, expiration, eviction, per-command, and snapshot metrics
+- When metrics are enabled, `GET /metrics` exposes Prometheus-style counters and gauges
+
+## CI
+- GitHub Actions runs linting, the full pytest suite, and a benchmark smoke test from [.github/workflows/ci.yml](C:\Users\devgu\Downloads\PyRedis\.github\workflows\ci.yml)
+
+## Transactions
+- `MULTI` starts a queued transaction for the current connection
+- queued commands return `QUEUED`
+- `EXEC` runs the queued commands and returns an array of raw RESP replies
+- `DISCARD` clears the queued transaction without applying it

@@ -82,6 +82,19 @@ async def test_extended_string_and_zset_commands(redis_client):
 
 
 @pytest.mark.asyncio
+async def test_additional_redis_commands(redis_client):
+    reader, writer = redis_client
+    assert await send_command(writer, reader, "SET", "alpha", "1") == b"+OK\r\n"
+    assert await send_command(writer, reader, "GETSET", "alpha", "2") == b"$1\r\n1\r\n"
+    assert await send_command(writer, reader, "GET", "alpha") == b"$1\r\n2\r\n"
+    assert await send_command(writer, reader, "PEXPIRE", "alpha", "1500") == b":1\r\n"
+    pttl_response = await send_command(writer, reader, "PTTL", "alpha")
+    assert int(pttl_response[1:-2]) > 0
+    assert await send_command(writer, reader, "RENAME", "alpha", "beta") == b"+OK\r\n"
+    assert await send_command(writer, reader, "KEYS", "b*") == b"*1\r\n$4\r\nbeta\r\n"
+
+
+@pytest.mark.asyncio
 async def test_wrong_type_and_invalid_argument_errors(redis_client):
     reader, writer = redis_client
     await send_command(writer, reader, "ZADD", "leaders", "1", "alice")
@@ -215,6 +228,78 @@ async def test_save_and_reload_snapshot(redis_server, tmp_path: Path):
     finally:
         writer2.close()
         await writer2.wait_closed()
+        await reloaded.close()
+
+
+@pytest.mark.asyncio
+async def test_multi_exec_and_discard(redis_client):
+    reader, writer = redis_client
+    assert await send_command(writer, reader, "MULTI") == b"+OK\r\n"
+    assert await send_command(writer, reader, "SET", "trans:key", "1") == b"+QUEUED\r\n"
+    assert await send_command(writer, reader, "INCRBY", "trans:key", "4") == b"+QUEUED\r\n"
+    assert (
+        await send_command(writer, reader, "EXEC")
+        == b"*2\r\n+OK\r\n:5\r\n"
+    )
+    assert await send_command(writer, reader, "GET", "trans:key") == b"$1\r\n5\r\n"
+
+    assert await send_command(writer, reader, "MULTI") == b"+OK\r\n"
+    assert await send_command(writer, reader, "SET", "trans:key", "9") == b"+QUEUED\r\n"
+    assert await send_command(writer, reader, "DISCARD") == b"+OK\r\n"
+    assert await send_command(writer, reader, "GET", "trans:key") == b"$1\r\n5\r\n"
+
+
+@pytest.mark.asyncio
+async def test_append_only_replay_and_metrics_endpoint(durable_server, tmp_path: Path):
+    host, port, metrics_host, metrics_port, server = durable_server
+    reader, writer = await asyncio.open_connection(host, port)
+    try:
+        assert await send_command(writer, reader, "SET", "persist:aof", "value") == b"+OK\r\n"
+        assert await send_command(writer, reader, "MULTI") == b"+OK\r\n"
+        assert await send_command(writer, reader, "INCRBY", "txn", "2") == b"+QUEUED\r\n"
+        assert await send_command(writer, reader, "EXEC") == b"*1\r\n:2\r\n"
+        assert await send_command(writer, reader, "BGSAVE") == b"+Background saving started\r\n"
+        await asyncio.sleep(0.3)
+    finally:
+        writer.close()
+        await writer.wait_closed()
+        await server.close()
+
+    from pyredis.config import ServerConfig
+    from pyredis.server import PyRedisServer
+
+    reloaded = PyRedisServer(
+        ServerConfig(
+            host="127.0.0.1",
+            port=0,
+            max_keys=10,
+            ttl_check_interval=0.05,
+            snapshot_path=str(tmp_path / "durable-dump.json"),
+            appendonly_enabled=True,
+            appendonly_path=str(tmp_path / "appendonly.aof"),
+            metrics_enabled=True,
+            metrics_host="127.0.0.1",
+            metrics_port=0,
+        )
+    )
+    await reloaded.start()
+    host2, port2 = reloaded.address
+    metrics_host2, metrics_port2 = reloaded.metrics_address
+    reader2, writer2 = await asyncio.open_connection(host2, port2)
+    metrics_reader, metrics_writer = await asyncio.open_connection(metrics_host2, metrics_port2)
+    try:
+        assert await send_command(writer2, reader2, "GET", "persist:aof") == b"$5\r\nvalue\r\n"
+        assert await send_command(writer2, reader2, "GET", "txn") == b"$1\r\n2\r\n"
+        metrics_writer.write(b"GET /metrics HTTP/1.1\r\nHost: localhost\r\n\r\n")
+        await metrics_writer.drain()
+        metrics_payload = await metrics_reader.read()
+        assert b"pyredis_commands_processed" in metrics_payload
+        assert b'pyredis_command_count{command="get"}' in metrics_payload
+    finally:
+        writer2.close()
+        metrics_writer.close()
+        await writer2.wait_closed()
+        await metrics_writer.wait_closed()
         await reloaded.close()
 
 

@@ -31,12 +31,6 @@ async def _read_response(reader) -> bytes:
         count = int(first[1:-2])
         chunks = [first]
         for _ in range(count):
-            header = await reader.readuntil(b"\r\n")
-            chunks.append(header)
-            length = int(header[1:-2])
-            if length == -1:
-                continue
-            payload = await reader.readexactly(length + 2)
-            chunks.append(payload)
+            chunks.append(await _read_response(reader))
         return b"".join(chunks)
     raise AssertionError(f"Unknown RESP prefix: {prefix!r}")

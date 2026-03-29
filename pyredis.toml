@@ -7,4 +7,11 @@ require_password = ""
 snapshot_path = "data/dump.json"
 snapshot_on_shutdown = false
 load_snapshot_on_startup = true
-
+snapshot_interval_seconds = 0.0
+appendonly_enabled = false
+appendonly_path = "data/appendonly.aof"
+appendfsync_always = false
+metrics_enabled = false
+metrics_host = "127.0.0.1"
+metrics_port = 9101
+log_level = "INFO"

@@ -132,6 +132,20 @@ async def test_string_commands_append_setnx_incrby_and_strlen():
 
 
 @pytest.mark.asyncio
+async def test_getset_pttl_pexpire_keys_and_rename():
+    store = DataStore(max_keys=10)
+    await store.set("user:1", "alice")
+    assert await store.getset("user:1", "bob") == "alice"
+    assert await store.get("user:1") == "bob"
+    assert await store.pexpire("user:1", 1500) is True
+    assert await store.pttl("user:1") > 0
+    assert await store.keys("user:*") == ["user:1"]
+    await store.rename("user:1", "user:2")
+    assert await store.get("user:2") == "bob"
+    assert await store.keys("user:*") == ["user:2"]
+
+
+@pytest.mark.asyncio
 async def test_zset_score_card_and_remove():
     store = DataStore(max_keys=5)
     await store.zadd("leaders", [(2.0, "bob"), (1.0, "alice")])

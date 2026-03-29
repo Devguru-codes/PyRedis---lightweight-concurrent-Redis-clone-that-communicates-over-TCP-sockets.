@@ -4,13 +4,14 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import logging
 import time
 
 from .commands import CommandContext, dispatch_command
 from .config import ServerConfig
 from .datastore import DataStore
 from .errors import ProtocolError
-from .persistence import SnapshotManager
+from .persistence import AppendOnlyManager, SnapshotManager
 from .protocol import encode_error, read_command
 
 
@@ -19,28 +20,49 @@ class PyRedisServer:
         self.config = config or ServerConfig()
         self.datastore = DataStore(max_keys=self.config.max_keys)
         self.snapshot_manager = SnapshotManager(self.config.snapshot_path)
+        self.aof_manager = AppendOnlyManager(
+            self.config.appendonly_path,
+            fsync_always=self.config.appendfsync_always,
+        )
         self.stats = {
             "commands_processed": 0,
             "command_errors": 0,
             "total_connections": 0,
             "active_connections": 0,
             "started_at": int(time.time()),
+            "last_command_latency_us": 0.0,
+            "per_command_counts": {},
+            "per_command_latency_us_total": {},
         }
         self._server: asyncio.AbstractServer | None = None
+        self._metrics_server: asyncio.AbstractServer | None = None
         self._expiry_task: asyncio.Task | None = None
+        self._snapshot_task: asyncio.Task | None = None
         self._connection_sequence = 0
+        self._logger = logging.getLogger("pyredis")
 
     async def start(self) -> None:
         if self._server is not None:
             return
+        self._logger.setLevel(getattr(logging, self.config.log_level.upper(), logging.INFO))
         if self.config.load_snapshot_on_startup:
             await self.snapshot_manager.load(self.datastore)
+        if self.config.appendonly_enabled:
+            await self.aof_manager.replay(self.datastore)
         self._server = await asyncio.start_server(
             self._handle_client,
             host=self.config.host,
             port=self.config.port,
         )
         self._expiry_task = asyncio.create_task(self._expiry_loop())
+        if self.config.snapshot_interval_seconds > 0:
+            self._snapshot_task = asyncio.create_task(self._snapshot_loop())
+        if self.config.metrics_enabled:
+            self._metrics_server = await asyncio.start_server(
+                self._handle_metrics_client,
+                host=self.config.metrics_host,
+                port=self.config.metrics_port,
+            )
 
     async def serve_forever(self) -> None:
         await self.start()
@@ -51,21 +73,40 @@ class PyRedisServer:
     async def close(self) -> None:
         if self.config.snapshot_on_shutdown:
             await self.snapshot_manager.save(self.datastore)
+            if self.config.appendonly_enabled:
+                await self.aof_manager.rewrite_from_snapshot(self.datastore)
         if self._server is not None:
             self._server.close()
             await self._server.wait_closed()
             self._server = None
+        if self._metrics_server is not None:
+            self._metrics_server.close()
+            await self._metrics_server.wait_closed()
+            self._metrics_server = None
         if self._expiry_task is not None:
             self._expiry_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await self._expiry_task
             self._expiry_task = None
+        if self._snapshot_task is not None:
+            self._snapshot_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await self._snapshot_task
+            self._snapshot_task = None
+        await self.snapshot_manager.wait()
 
     @property
     def address(self) -> tuple[str, int]:
         if self._server is None or not self._server.sockets:
             return self.config.host, self.config.port
         host, port = self._server.sockets[0].getsockname()[:2]
+        return host, port
+
+    @property
+    def metrics_address(self) -> tuple[str, int]:
+        if self._metrics_server is None or not self._metrics_server.sockets:
+            return self.config.metrics_host, self.config.metrics_port
+        host, port = self._metrics_server.sockets[0].getsockname()[:2]
         return host, port
 
     async def _handle_client(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
@@ -77,6 +118,7 @@ class PyRedisServer:
             stats=self.stats,
             server_started_at=self.stats["started_at"],
             snapshot_manager=self.snapshot_manager,
+            aof_manager=self.aof_manager if self.config.appendonly_enabled else None,
             require_password=self.config.require_password,
             authenticated=self.config.require_password is None,
             connection_id=self._connection_sequence,
@@ -103,9 +145,19 @@ class PyRedisServer:
                     writer.write(encode_error(f"ERR protocol error: {exc}"))
                     await writer.drain()
                     break
+                command_name = parts[0].upper() if parts else "UNKNOWN"
+                started = time.perf_counter()
                 response = await dispatch_command(context, parts)
+                elapsed_us = round((time.perf_counter() - started) * 1_000_000, 2)
                 writer.write(response)
                 await writer.drain()
+                self._logger.info(
+                    "event=request connection_id=%s command=%s latency_us=%s authenticated=%s",
+                    context.connection_id,
+                    command_name,
+                    elapsed_us,
+                    context.authenticated,
+                )
         except (ConnectionError, BrokenPipeError):
             pass
         finally:
@@ -118,3 +170,68 @@ class PyRedisServer:
         while True:
             await self.datastore.purge_expired()
             await asyncio.sleep(self.config.ttl_check_interval)
+
+    async def _snapshot_loop(self) -> None:
+        while True:
+            await asyncio.sleep(self.config.snapshot_interval_seconds)
+            await self.snapshot_manager.save(self.datastore)
+            if self.config.appendonly_enabled:
+                await self.aof_manager.rewrite_from_snapshot(self.datastore)
+
+    async def _handle_metrics_client(
+        self,
+        reader: asyncio.StreamReader,
+        writer: asyncio.StreamWriter,
+    ) -> None:
+        try:
+            request_line = await reader.readline()
+            if not request_line:
+                return
+            payload = await self._build_prometheus_metrics()
+            status = b"HTTP/1.1 200 OK\r\n"
+            headers = (
+                b"Content-Type: text/plain; version=0.0.4\r\n"
+                + f"Content-Length: {len(payload)}\r\n\r\n".encode("utf-8")
+            )
+            writer.write(status + headers + payload)
+            await writer.drain()
+        finally:
+            writer.close()
+            with contextlib.suppress(ConnectionError):
+                await writer.wait_closed()
+
+    async def _build_prometheus_metrics(self) -> bytes:
+        info = await self.datastore.info()
+        lines = [
+            "# TYPE pyredis_commands_processed counter",
+            f"pyredis_commands_processed {self.stats['commands_processed']}",
+            "# TYPE pyredis_command_errors counter",
+            f"pyredis_command_errors {self.stats['command_errors']}",
+            "# TYPE pyredis_active_connections gauge",
+            f"pyredis_active_connections {self.stats['active_connections']}",
+            "# TYPE pyredis_total_connections counter",
+            f"pyredis_total_connections {self.stats['total_connections']}",
+            "# TYPE pyredis_keys gauge",
+            f"pyredis_keys {info['keys']}",
+            "# TYPE pyredis_expired_keys counter",
+            f"pyredis_expired_keys {info['expired_keys']}",
+            "# TYPE pyredis_evicted_keys counter",
+            f"pyredis_evicted_keys {info['evicted_keys']}",
+            "# TYPE pyredis_total_reads counter",
+            f"pyredis_total_reads {info['total_reads']}",
+            "# TYPE pyredis_total_writes counter",
+            f"pyredis_total_writes {info['total_writes']}",
+        ]
+        command_counts = self.stats.get("per_command_counts", {})
+        assert isinstance(command_counts, dict)
+        latency_totals = self.stats.get("per_command_latency_us_total", {})
+        assert isinstance(latency_totals, dict)
+        for name, count in sorted(command_counts.items()):
+            lines.append(
+                f'pyredis_command_count{{command="{name.lower()}"}} {count}'
+            )
+        for name, total in sorted(latency_totals.items()):
+            lines.append(
+                f'pyredis_command_latency_us_total{{command="{name.lower()}"}} {total}'
+            )
+        return ("\n".join(lines) + "\n").encode("utf-8")

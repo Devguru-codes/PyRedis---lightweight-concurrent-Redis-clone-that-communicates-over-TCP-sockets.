@@ -6,6 +6,7 @@ services:
       PYREDIS_CONFIG: /app/pyredis.toml
     ports:
       - "6380:6380"
+      - "9101:9101"
     volumes:
       - ./data:/app/data
       - ./benchmarks:/app/benchmarks

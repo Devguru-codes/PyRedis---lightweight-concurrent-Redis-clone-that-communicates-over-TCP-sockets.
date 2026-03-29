@@ -20,6 +20,14 @@ class ServerConfig:
     snapshot_path: str = "data/dump.json"
     snapshot_on_shutdown: bool = False
     load_snapshot_on_startup: bool = True
+    snapshot_interval_seconds: float = 0.0
+    appendonly_enabled: bool = False
+    appendonly_path: str = "data/appendonly.aof"
+    appendfsync_always: bool = False
+    metrics_enabled: bool = False
+    metrics_host: str = "127.0.0.1"
+    metrics_port: int = 9101
+    log_level: str = "INFO"
 
 
 def load_config(config_path: str | None) -> ServerConfig:

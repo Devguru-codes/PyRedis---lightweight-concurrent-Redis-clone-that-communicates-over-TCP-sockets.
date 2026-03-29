@@ -68,3 +68,41 @@ Build a lightweight in-memory Redis-inspired datastore with:
 - [x] Phase 5 extended structures completed
 - [x] Phase 6 testing and verification completed
 - [x] Phase 7 containerization and CI completed
+
+## Phase 8: Durable Persistence
+- Add append-only logging (AOF) for mutating commands
+- Replay AOF on startup for crash recovery
+- Support background snapshots with atomic file replacement
+- Add snapshot compaction by rewriting the current state to a clean snapshot
+- Expose `BGSAVE` and config toggles for snapshot/AOF behavior
+
+## Phase 9: Expanded Redis Compatibility
+- Add more keyspace and string commands:
+  - `GETSET`, `KEYS`, `RENAME`
+  - `PTTL`, `PEXPIRE`
+- Improve sorted-set and generic command support where helpful
+- Keep responses Redis-style and compatible with existing RESP tests
+
+## Phase 10: Transactions And Request Flow
+- Add per-connection transaction state
+- Support `MULTI`, `EXEC`, and `DISCARD`
+- Ensure pipelined requests continue to work cleanly with transactions
+- Add regression coverage for queued command semantics
+
+## Phase 11: Observability And Runtime UX
+- Add structured request logging
+- Track per-command latency metrics and command histograms/counters
+- Expose a Prometheus-style `/metrics` HTTP endpoint
+- Document operational visibility and benchmark output
+
+## Phase 12: CI Restoration And Extended Validation
+- Restore GitHub Actions workflow for lint, tests, and benchmark checks
+- Add tests for AOF replay, background snapshots, metrics endpoint, and transactions
+- Keep new code paths covered by unit and socket-level integration tests
+
+## Milestone 2 Checklist
+- [x] Phase 8 durable persistence completed
+- [x] Phase 9 expanded Redis compatibility completed
+- [x] Phase 10 transactions and request flow completed
+- [x] Phase 11 observability and runtime UX completed
+- [x] Phase 12 CI restoration and extended validation completed

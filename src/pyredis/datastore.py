@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import fnmatch
 import time
 from dataclasses import dataclass
 from typing import Any
@@ -391,6 +392,79 @@ class DataStore:
     async def purge_expired(self) -> int:
         async with self._lock:
             return self._purge_expired_locked()
+
+    async def pexpire(self, key: str, milliseconds: int) -> bool:
+        async with self._lock:
+            self._purge_expired_locked()
+            self._metrics["total_writes"] += 1
+            record = self._records.get(key)
+            if record is None:
+                return False
+            record.expiry_version += 1
+            record.expires_at = time.time() + (milliseconds / 1000)
+            self._ttl_heap.schedule(key, record.expires_at, record.expiry_version)
+            self._lru.touch(key)
+            return True
+
+    async def pttl(self, key: str) -> int:
+        async with self._lock:
+            self._purge_expired_locked()
+            self._metrics["total_reads"] += 1
+            record = self._records.get(key)
+            if record is None:
+                return -2
+            if record.expires_at is None:
+                return -1
+            return max(int((record.expires_at - time.time()) * 1000), 0)
+
+    async def getset(self, key: str, value: str) -> str | None:
+        async with self._lock:
+            self._purge_expired_locked()
+            self._metrics["total_reads"] += 1
+            self._metrics["total_writes"] += 1
+            existing = self._records.get(key)
+            previous: str | None = None
+            version = 0
+            if existing is not None:
+                if existing.kind != "string":
+                    raise WrongTypeError("WRONGTYPE Operation against a key holding the wrong kind of value")
+                previous = str(existing.value)
+                self._metrics["read_hits"] += 1
+                version = existing.expiry_version + 1
+            else:
+                self._metrics["read_misses"] += 1
+            self._records[key] = Record("string", value, None, version)
+            self._lru.touch(key)
+            self._evict_if_needed_locked()
+            return previous
+
+    async def rename(self, source: str, target: str) -> None:
+        async with self._lock:
+            self._purge_expired_locked()
+            self._metrics["total_writes"] += 1
+            record = self._records.get(source)
+            if record is None:
+                raise CommandError("ERR no such key")
+            if source == target:
+                self._lru.touch(source)
+                return
+            self._records[target] = record
+            self._records.pop(source, None)
+            self._lru.remove(source)
+            self._lru.touch(target)
+
+    async def keys(self, pattern: str) -> list[str]:
+        async with self._lock:
+            self._purge_expired_locked()
+            self._metrics["total_reads"] += 1
+            matched = [key for key in sorted(self._records) if fnmatch.fnmatchcase(key, pattern)]
+            if matched:
+                self._metrics["read_hits"] += len(matched)
+            else:
+                self._metrics["read_misses"] += 1
+            for key in matched:
+                self._lru.touch(key)
+            return matched
 
     def _purge_expired_locked(self) -> int:
         removed = 0
